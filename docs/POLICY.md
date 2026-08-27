@@ -1,147 +1,165 @@
-# Policy Specification (Draft & Proposed Decisions)
+# Policy Specification (Draft & Proposed Policy)
 
-
-
-## Purpose
-To define a strictly deterministic, reproducible, and verifiable policy engine that evaluates historical API call logs to model provider health, execute circuit-breaking, enforce retry limits, and log stopped intervals.
-
-- **Source**: Our policy decision
+> [!IMPORTANT]
+> **Document Status**: `PROPOSED POLICY — PENDING REVIEW`
+> This document contains the proposed policy specification formulated during Phase 2. Every section below is explicitly marked as **`PROPOSED — NOT YET APPROVED`**. 
+> Per the BRIEF, these are **our policy decisions**, not instructor mandates. They will be formalized into the binding state machine in Phase 3 upon user review and approval.
 
 ---
 
-## Failure Definition
-A call outcome is classified as a **Failure** if any of the following conditions are met:
-1. `status == "error"`
-2. `status == "timeout"`
-3. `status == "ok"` AND `latency_ms > slow_threshold_ms` (slow success degradation)
-4. Any unrecognized / unknown status string.
+## Proposed Policy — Pending Review
 
-- **Source**: Our policy decision
+### 1. Purpose
+- **Status**: PROPOSED — NOT YET APPROVED
+- To define a deterministic, reproducible, and verifiable policy engine that evaluates historical API call logs to model provider health, execute circuit breaking, enforce retry limits, and log stopped intervals.
+- **Source**: Our policy analysis
 
 ---
 
-## Failure Threshold
-The circuit breaker trips from `CLOSED` to `OPEN` when a provider accumulates `failure_threshold` consecutive failures.
-- **Proposed Value**: `3` (configured via `failure_threshold` in `config.json`).
-- **Source**: Our policy decision
+### 2. Failure Definition (Decision 1 & 2)
+- **Status**: PROPOSED — NOT YET APPROVED
+- A call outcome is classified as a provider health failure if:
+  1. `status == "error"`
+  2. `status == "timeout"`
+  3. `status == "ok"` AND `latency_ms > slow_threshold_ms` (slow success degradation)
+  4. Status is unrecognized / unknown.
+- Slow successes (`status == "ok"` with `latency_ms > slow_threshold_ms`) deliver the response as `action: "attempt"`, but increment the provider's consecutive failure count.
+- **Source**: Our policy analysis
 
 ---
 
-## Failure Window
-- **Proposed Policy**: **Continuous consecutive sequence**. The failure counter increments on every failure and resets to 0 on any fast success (`status == "ok"` AND `latency_ms <= slow_threshold_ms`).
-- **Source**: Our policy decision
+### 3. Failure Threshold (Decision 4)
+- **Status**: PROPOSED — NOT YET APPROVED
+- The circuit breaker trips from `CLOSED` to `OPEN` when a provider accumulates `failure_threshold` consecutive failures.
+- **Proposed Default**: `3` consecutive failures (configurable via `failure_threshold` in `config.json`).
+- **Source**: Our policy analysis
 
 ---
 
-## Circuit Breaker Scope
-- **Proposed Policy**: **Per-provider isolation**. Each provider maintains its own independent state machine, counters, timers, and stopped intervals. An outage in provider `alpha` has zero impact on provider `beta`.
-- **Source**: Our policy decision
+### 4. Failure Window & Metric (Decision 3 & 5)
+- **Status**: PROPOSED — NOT YET APPROVED
+- **Metric**: Consecutive failure count.
+- **Window**: Continuous sequence. Counter increments on any failure and resets to 0 on any fast success (`status == "ok"` AND `latency_ms <= slow_threshold_ms`). No time window decay is applied, guaranteeing 100% determinism across sparse/batch logs.
+- **Source**: Our policy analysis
 
 ---
 
-## Open-Circuit Behavior
-When a provider is in the `OPEN` state and cooldown has not elapsed:
-- Incoming calls are refused upfront without attempting execution.
-- **Output Action**: `refuse`
-- **Provider State**: `OPEN`
-- **Reason**: `circuit_open_refusal`
-- **Source**: Our policy decision
+### 5. Circuit Breaker Scope (Decision 6)
+- **Status**: PROPOSED — NOT YET APPROVED
+- **Scope**: Per-provider isolation. Each provider maintains an independent finite state machine, failure counter, cooldown timer, and stopped intervals list. Outages in one provider never affect another.
+- **Source**: Our policy analysis
 
 ---
 
-## Cooldown
-- **Proposed Policy**: Fixed configurable duration in milliseconds.
-- **Proposed Value**: `30000` (30 seconds, configured via `cooldown_ms` in `config.json`).
-- **Timing Rule**: A provider remains `OPEN` until a call arrives at `current_time >= opened_at + cooldown_ms`.
-- **Source**: Our policy decision
+### 6. New Provider Handling (Decision 7)
+- **Status**: PROPOSED — NOT YET APPROVED
+- When a call for an unseen provider arrives, the engine dynamically initializes an isolated state machine for that provider in the `CLOSED` state with `consecutive_failures = 0`.
+- **Source**: Our policy analysis
 
 ---
 
-## Probe Behavior
-When the cooldown period has elapsed (`current_time >= opened_at + cooldown_ms`):
-- The provider transitions to `HALF_OPEN`.
-- Exactly **one probe call** is admitted to test provider recovery.
-- **Output Action**: `probe`
-- **Provider State**: `HALF_OPEN`
-- **Reason**: `probe_call_attempt`
-- **Source**: Our policy decision
+### 7. OPEN State Behavior (Decision 8)
+- **Status**: PROPOSED — NOT YET APPROVED
+- When a provider is in the `OPEN` state and cooldown has not elapsed (`current_time < opened_at + cooldown_ms`):
+  - Incoming calls are refused upfront without attempting execution.
+  - **Action**: `refuse`
+  - **Provider State**: `OPEN`
+  - **Reason**: `circuit_open_refusal`
+- Refused calls do NOT count as new failures (they are rejected upfront).
+- **Source**: Our policy analysis
 
 ---
 
-## Probe Success
-If the probe call succeeds (`status == "ok"` AND `latency_ms <= slow_threshold_ms`):
-- Provider transitions immediately to `CLOSED`.
-- `consecutive_failures` is reset to 0.
-- Active stopped period is closed, recording `resumed_at`.
-- **Reason**: `probe_success_recovery`
-- **Source**: Our policy decision
+### 8. Cooldown Duration (Decision 9)
+- **Status**: PROPOSED — NOT YET APPROVED
+- Fixed configurable duration in milliseconds.
+- **Proposed Default**: `30000` ms (30 seconds, configured via `cooldown_ms` in `config.json`).
+- **Source**: Our policy analysis
 
 ---
 
-## Probe Failure
-If the probe call fails (`error`, `timeout`, slow `ok`, or unknown status):
-- Provider transitions immediately back to `OPEN`.
-- A new cooldown period begins from the probe call timestamp (`opened_at = probe_started_at`).
-- **Reason**: `probe_failure_reopen`
-- **Source**: Our policy decision
+### 9. HALF_OPEN & Probe Behavior (Decision 10)
+- **Status**: PROPOSED — NOT YET APPROVED
+- When cooldown has elapsed (`current_time >= opened_at + cooldown_ms`):
+  - The provider transitions to `HALF_OPEN`.
+  - Exactly **one probe call** is admitted to test provider recovery.
+  - **Action**: `probe`
+  - **Provider State**: `HALF_OPEN`
+  - **Reason**: `probe_call_attempt`
+- Any calls arriving while a probe is pending are refused.
+- **Source**: Our policy analysis
 
 ---
 
-## Retry Policy & Eligibility
-Retries are permitted only when all of the following conditions are met:
-1. The call outcome was a transient failure (`error` or `timeout`).
-2. The target provider is currently `CLOSED` (healthy).
-3. The call has not exceeded `max_retries`.
-*(Slow successes and unrecognized statuses are never retried).*
-
-- **Source**: Our policy decision
-
----
-
-## Retry Count
-- **Proposed Policy**: Maximum retries permitted per call.
-- **Proposed Value**: `1` retry (configured via `max_retries` in `config.json`).
-- **Source**: Our policy decision
+### 10. Probe Success Handling (Decision 11)
+- **Status**: PROPOSED — NOT YET APPROVED
+- If the probe call succeeds (`status == "ok"` AND `latency_ms <= slow_threshold_ms`):
+  - Provider transitions immediately to `CLOSED`.
+  - `consecutive_failures` is reset to 0.
+  - The active stopped period is closed, recording `resumed_at = probe_started_at`.
+  - **Reason**: `probe_success_recovery`
+- **Source**: Our policy analysis
 
 ---
 
-## Retry Backoff
-- **Proposed Policy**: Fixed deterministic delay.
-- **Proposed Value**: `1000` ms (configured via `retry_delay_ms` in `config.json`).
-- **Source**: Our policy decision
+### 11. Probe Failure Handling (Decision 12)
+- **Status**: PROPOSED — NOT YET APPROVED
+- If the probe call fails (error, timeout, slow `ok`, or unknown status):
+  - Provider transitions immediately back to `OPEN`.
+  - A new cooldown period begins from the probe call timestamp (`opened_at = probe_started_at`).
+  - Active stopped period continues.
+  - **Reason**: `probe_failure_reopen`
+- **Source**: Our policy analysis
 
 ---
 
-## Determinism
-- **Proposed Policy**: Pure deterministic logic with zero random jitter.
-- The engine produces byte-for-byte identical output on every run across all platforms.
-- **Source**: Our policy decision
+### 12. Retry Policy & Eligibility (Decision 14 & 16)
+- **Status**: PROPOSED — NOT YET APPROVED
+- Retries are permitted ONLY when:
+  1. The call outcome was a transient failure (`status == "error"` or `status == "timeout"`).
+  2. The target provider is currently `CLOSED` (healthy).
+  3. The call has not exceeded `max_retries`.
+- Slow successes and unknown statuses are never retried.
+- Every executed attempt/retry that fails increments the provider's `consecutive_failures`.
+- **Source**: Our policy analysis
 
 ---
 
-## Unknown Providers
-- When a call for an unseen provider arrives, the engine automatically initializes an isolated state machine for that provider in the `CLOSED` state with `consecutive_failures = 0`.
-- **Source**: Our policy decision
+### 13. Retry Count (Decision 13)
+- **Status**: PROPOSED — NOT YET APPROVED
+- Maximum retries allowed per call: `1` (configured via `max_retries` in `config.json`).
+- **Source**: Our policy analysis
 
 ---
 
-## Unknown Statuses
+### 14. Retry Backoff & Timing Determinism (Decision 15 & 17)
+- **Status**: PROPOSED — NOT YET APPROVED
+- Fixed deterministic delay: `1000` ms (configured via `retry_delay_ms` in `config.json`).
+- Zero pseudo-random jitter is used, guaranteeing byte-for-byte reproducibility across runs and environments.
+- **Source**: Our policy analysis
+
+---
+
+### 15. Unknown Statuses Handling (Decision 18)
+- **Status**: PROPOSED — NOT YET APPROVED
 - Unrecognized status values are treated as unretryable failures.
 - Increments provider failure count and outputs `action: "attempt"` with `reason: "unrecognized_status_failure"`.
-- Preserves 1:1 input/output cardinality without crashing.
-- **Source**: Our policy decision
+- Preserves 1:1 input/output line cardinality without crashing.
+- **Source**: Our policy analysis
 
 ---
 
-## Out-of-Order Timestamps
-- Records are processed strictly in file arrival order to maintain 1:1 line ordering in `decisions.jsonl`.
-- Time tracking uses monotonic maximum observed timestamps to evaluate cooldown boundaries.
-- **Source**: Our policy decision
+### 16. Out-of-Order Timestamps (Decision 19)
+- **Status**: PROPOSED — NOT YET APPROVED
+- Records are processed strictly in arrival order to preserve 1:1 input ordering in `decisions.jsonl`.
+- Monotonic maximum timestamp tracking (`current_time = max(max_seen_time, record_time)`) is used for cooldown boundary evaluation.
+- **Source**: Our policy analysis
 
 ---
 
-## Configuration (`config.json`)
-All tunable parameters live exclusively in `config.json`:
+### 17. Configuration Model (`config.json`)
+- **Status**: PROPOSED — NOT YET APPROVED
+- All tunable parameters reside exclusively in `config.json`:
 ```json
 {
   "failure_threshold": 3,
@@ -151,12 +169,15 @@ All tunable parameters live exclusively in `config.json`:
   "retry_delay_ms": 1000
 }
 ```
-
-- **Source**: Our policy decision
+- Zero tunable constants hardcoded in logic.
+- **Source**: Our policy analysis
 
 ---
 
-## Action Vocabulary
+### 18. Controlled Vocabulary Specifications (Decisions 20, 21, 22)
+- **Status**: PROPOSED — NOT YET APPROVED
+
+#### Action Vocabulary
 | Action | Definition |
 | :--- | :--- |
 | `attempt` | Normal execution of an API call to a healthy provider |
@@ -165,22 +186,14 @@ All tunable parameters live exclusively in `config.json`:
 | `refuse` | Rejecting a call upfront because provider circuit is `OPEN` |
 | `probe` | Test call admitted during `HALF_OPEN` state after cooldown expiry |
 
-- **Source**: Our policy decision
-
----
-
-## Provider State Vocabulary
+#### Provider State Vocabulary
 | State | Definition |
 | :--- | :--- |
 | `CLOSED` | Provider is healthy; normal traffic flows |
 | `OPEN` | Provider is unhealthy; calls are refused |
-| `HALF_OPEN` | Cooldown expired; evaluating a single probe call |
+| `HALF_OPEN` | Cooldown expired; provider is evaluating a single probe call |
 
-- **Source**: Our policy decision
-
----
-
-## Reason Vocabulary
+#### Reason Vocabulary
 | Reason Code | Definition |
 | :--- | :--- |
 | `healthy_call_attempt` | Normal call executed to a healthy provider |
@@ -194,25 +207,23 @@ All tunable parameters live exclusively in `config.json`:
 | `slow_success_degradation` | Call succeeded but exceeded latency threshold |
 | `unrecognized_status_failure` | Unrecognized status handled as unretryable failure |
 
-- **Source**: Our policy decision
+- **Source**: Our policy analysis
 
 ---
 
-## Processing Rules
-1. **Arrival Order**: Read each line from `outcomes.jsonl` sequentially.
-2. **Provider Resolution**: Lookup or initialize provider state machine.
-3. **Breaker Assessment**: Check current state and evaluate timestamp against cooldown.
-4. **Action Determination**: Determine whether to attempt, probe, refuse, or retry.
-5. **Outcome Evaluation & Transition**: Update failure counters, state transitions, and stopped period tracking.
-6. **Output Emission**: Write decision record to `decisions.jsonl`.
-7. **Summary Report**: On stream completion, emit `stopped_periods.json`.
-
-- **Source**: Our policy decision
-
----
-
-## Decision Rationale
-- **Simplicity**: Minimized state explosion to 3 states and consecutive counting.
-- **Predictability**: 100% deterministic rules allow rapid mental calculation during live walkthroughs.
-- **Mutation Resistance**: Explicit boundaries ($N$, $N-1$, $T_{\text{cooldown}}$) with clear killing tests.
-- **Source**: Our policy decision
+### 19. Second Output Schema (Decision 23)
+- **Status**: PROPOSED — NOT YET APPROVED
+- File: `stopped_periods.json`
+- Schema:
+```json
+{
+  "alpha": [
+    {
+      "stopped_at": "2026-09-01T10:00:02.000Z",
+      "resumed_at": "2026-09-01T10:00:32.000Z",
+      "duration_ms": 30000
+    }
+  ]
+}
+```
+- **Source**: Our policy analysis

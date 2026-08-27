@@ -5,7 +5,7 @@
 ### 1. Delivery and Schema of Provider Stopped Periods Output
 - **Question**: Does the second output showing provider stopped periods require a specific filename, file format, or pre-set schema, and how must it be generated?
 - **Status**: Clear in BRIEF
-- **Answer**: The BRIEF explicitly states: *"Plus a second output showing, per provider, the periods during which you would have stopped calling it. Name and shape are yours."* and *"One documented command turns an outcomes.jsonl plus your config into your outputs."* We define the filename and data structure in `POLICY.md`, and generate both outputs with a single CLI command.
+- **Answer**: The BRIEF explicitly states: *"Plus a second output showing, per provider, the periods during which you would have stopped calling it. Name and shape are yours."* and *"One documented command turns an outcomes.jsonl plus your config into your outputs."* We will define the filename (`stopped_periods.json`) and data structure in `POLICY.md`, and generate both outputs with a single CLI command.
 - **Source**: BRIEF
 
 ### 2. Dependencies and Execution Environment
@@ -24,421 +24,438 @@
 
 ## B. Policy Decision Matrix (Our Decisions)
 
-> [!NOTE]
-> All items below represent our policy design framework. Per the BRIEF, these are **our policy decisions**, not instructor mandates.
+> [!IMPORTANT]
+> **Status of all items below**: `PENDING REVIEW` / `RECOMMENDATION — REQUIRES REVIEW`
+> Per the BRIEF, these are **our policy decisions**, not instructor mandates. No policy decision is finalized until explicitly approved.
 
 ---
 
 ### Decision 1: Failure Definition
-- **Question**: What call outcome statuses classify an upstream call as a failure for circuit breaker tracking?
-- **Options**:
+- **Question**: What call outcome statuses classify an upstream call as a provider health failure?
+- **Options considered**:
   - **Option A**: Only explicit `error` and `timeout`.
   - **Option B**: Explicit `error`, `timeout`, and slow `ok` (where `latency_ms > slow_threshold_ms`).
   - **Option C**: Only explicit `error`.
 - **Advantages**:
-  - *Option A*: Simple, directly maps to discrete status strings.
-  - *Option B*: Realistically protects the gateway from degraded upstream providers that respond with `ok` but take an excessive amount of time, causing thread starvation.
-  - *Option C*: Narrowest scope, but fails to handle timeouts and degraded providers.
+  - *Option A*: Minimalistic, directly matches explicit failure string literals.
+  - *Option B*: Realistically protects the gateway from upstream thread pool exhaustion and resource starvation caused by degraded, slow-responding model providers.
+  - *Option C*: Easiest to implement, but ignores timeouts and severe latency degradation.
 - **Disadvantages**:
-  - *Option B* requires introducing a configurable latency threshold parameter (`slow_threshold_ms`).
-- **Recommended Option**: **Option B** (`error`, `timeout`, and slow `ok` where `latency_ms > slow_threshold_ms`).
-- **Reason**: Upstream LLM providers often suffer from degraded generation latency rather than immediate hard errors. Treating pathological latency as a health failure prevents gateway queue buildup.
-- **Trade-offs**: Slightly more complex evaluation logic, but provides authentic circuit breaker behavior.
-- **Example Scenario**: A call returns `status: "ok"` with `latency_ms: 6500` when `slow_threshold_ms = 5000`.
-- **Expected Behavior**: Evaluated as a failure for circuit breaker health counting, but not retried (since response was already delivered).
+  - *Option B* introduces a latency threshold configuration parameter (`slow_threshold_ms`) that requires boundary verification.
+- **Recommendation**: **Option B** (`error`, `timeout`, and slow `ok` where `latency_ms > slow_threshold_ms`) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: In LLM gateways, an upstream provider that takes 10+ seconds to return `ok` can be just as catastrophic as an outright error. Classifying severe latency as a health failure prevents cascading gateway queue backups.
+- **Trade-offs**: Adds a latency threshold parameter, but accurately models real-world API degradation.
+- **Example Scenario**: Input record: `{"id": "c101", "provider": "alpha", "started_at": "...", "status": "ok", "latency_ms": 6200}` with `slow_threshold_ms: 5000`.
+- **Expected Behavior**: Evaluated as a failure for provider health tracking (increments consecutive failure count), but call result is delivered as `attempt` (not retried).
 - **Required Configuration Value**: `slow_threshold_ms` (integer, e.g. `5000`).
-- **Mutation Risks**: Mutation of `latency_ms > slow_threshold_ms` to `>=` or `<`.
-- **Boundary Tests Needed**: Calls with `latency_ms == slow_threshold_ms` (must be healthy) and `latency_ms == slow_threshold_ms + 1` (must be treated as failure).
-- **Source**: Our policy decision
+- **Mutation Risks**: Inverting operator (`>` changed to `>=` or `<`).
+- **Boundary Tests Needed**: Calls with `latency_ms == slow_threshold_ms` (must be healthy) vs. `latency_ms == slow_threshold_ms + 1` (must count as failure).
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 2: Slow Success Handling
-- **Question**: When a call succeeds (`status: "ok"`) but is slow (`latency_ms > slow_threshold_ms`), how should the engine act on the call itself vs. provider health?
-- **Options**:
-  - **Option A**: Call action is `attempt` (outcome accepted), but provider consecutive failure count increments.
-  - **Option B**: Call action is `retry` to get a faster response.
-  - **Option C**: Call action is `give_up`.
+### Decision 2: Slow Success Handling & Boundary
+- **Question**: If a call succeeds (`status: "ok"`) but is slow, how is the threshold boundary defined (`>` vs. `>=`), and how does the engine handle the call vs. provider health?
+- **Options considered**:
+  - **Option A**: Strict inequality `latency_ms > slow_threshold_ms`; call action is `attempt` (response delivered), provider failure counter increments by 1.
+  - **Option B**: Non-strict inequality `latency_ms >= slow_threshold_ms`; call action is `attempt`, provider failure counter increments.
+  - **Option C**: Retry the slow call to seek a faster response.
 - **Advantages**:
-  - *Option A*: Does not perform redundant duplicate LLM executions when a valid response was already received, while still tracking provider degradation.
+  - *Option A*: Clear standard boundary: exactly meeting the threshold is acceptable; exceeding it is degraded. Delivering the response avoids duplicate billing and LLM token generation.
 - **Disadvantages**:
-  - *Option B* wastes tokens and compute on duplicate generations.
-- **Recommended Option**: **Option A** (`action: "attempt"`, outcome accepted, consecutive failure count increments).
-- **Reason**: LLM calls are expensive and stateful; re-executing an already successful call produces duplicate side effects.
-- **Trade-offs**: Downstream receives a slow response, but gateway protects future traffic.
-- **Example Scenario**: Input `{"id":"c101","status":"ok","latency_ms":5500}` with `slow_threshold_ms: 5000`.
-- **Expected Behavior**: Output `action: "attempt"`, `provider_state: "CLOSED"`, `reason: "slow_success_degradation"`. Provider failure counter increments by 1.
-- **Required Configuration Value**: Governed by `slow_threshold_ms`.
-- **Mutation Risks**: Inverting check to reset failure counter instead of incrementing.
-- **Boundary Tests Needed**: Verify failure counter increments on slow `ok` and does NOT trigger a retry.
-- **Source**: Our policy decision
+  - *Option C* causes duplicate billing and non-idempotent side effects for an already fulfilled LLM prompt.
+- **Recommendation**: **Option A** (Strict inequality `latency_ms > slow_threshold_ms`; deliver as `attempt`, increment failure counter) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: LLM completions are stateful, costly, and non-idempotent. Once a valid response is generated, it must be returned to the client; re-issuing a retry would be wasteful.
+- **Trade-offs**: Downstream receives a high-latency response, but the gateway proactively protects future traffic.
+- **Example Scenario**: `slow_threshold_ms = 5000`. Call 1: `latency_ms = 5000` -> healthy. Call 2: `latency_ms = 5001` -> degraded failure.
+- **Expected Behavior**: Call 1 leaves failure counter at 0. Call 2 increments failure counter to 1, with reason `slow_success_degradation`.
+- **Required Configuration Value**: `slow_threshold_ms` (integer, e.g. `5000`).
+- **Mutation Risks**: Mutating `>` to `>=` or `<`.
+- **Boundary Tests Needed**: Assert `latency_ms = slow_threshold_ms` produces reason `healthy_call_attempt` while `slow_threshold_ms + 1` produces `slow_success_degradation`.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 3: Failure Metric Strategy
-- **Question**: What mathematical metric determines when a provider's circuit opens?
-- **Options**:
+### Decision 3: Failure Measurement Strategy
+- **Question**: What mathematical mechanism determines when a provider is unhealthy?
+- **Options considered**:
   - **Option A**: **Consecutive failure count** (counter increments on failure, resets to 0 on any fast success).
-  - **Option B**: **Sliding time window failure count** ($N$ failures in past $W$ seconds).
-  - **Option C**: **Sliding time window failure rate %** ($>X\%$ failure rate over window with minimum volume).
+  - **Option B**: **Sliding time window count** ($N$ failures within the last $W$ seconds).
+  - **Option C**: **Sliding time window rate %** ($>X\%$ failure rate over window $W$ with minimum call volume $V$).
 - **Advantages**:
-  - *Option A*: Extremely simple, strictly deterministic, completely independent of timestamp density, easy to calculate mentally during the 10-scenario prediction walkthrough.
-  - *Option B & C*: More flexible for high-throughput fluctuating traffic, but highly complex, prone to window boundary bugs and float rounding issues in mutation tests.
+  - *Option A*: Extremely simple, strictly deterministic, independent of timestamp distribution/density, effortless to calculate mentally during the 10-scenario prediction walkthrough.
+  - *Option B & C*: Better suited for fluctuating production traffic, but introduce sliding window state complexity, floating-point rounding bugs, and edge-case vulnerabilities in mutation tests.
 - **Disadvantages**:
-  - *Option A*: A single healthy call resets the failure counter, but this makes state transitions completely unambiguous.
-- **Recommended Option**: **Option A** (Consecutive failure count).
-- **Reason**: Maximizes determinism, testability, and predictability during the live prediction walkthrough.
-- **Trade-offs**: Less sensitive to intermittent fluttering errors, but robust and zero-defect verifiable.
-- **Example Scenario**: Calls: `error` (count 1), `error` (count 2), `ok` (count resets to 0), `error` (count 1).
-- **Expected Behavior**: Breaker remains `CLOSED` because failures were not consecutive.
-- **Required Configuration Value**: `failure_threshold` (integer, e.g. `3`).
-- **Mutation Risks**: Counter reset omitted on success or incrementing on success.
-- **Boundary Tests Needed**: Sequence `[failure, failure, success, failure, failure]` verifying breaker remains `CLOSED`.
-- **Source**: Our policy decision
+  - *Option A*: A single healthy response resets the failure counter. However, this creates completely unambiguous state transitions.
+- **Recommendation**: **Option A** (Consecutive failure count) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Predictability and simplicity are paramount for passing mutation tests and nailing the 10 walkthrough prediction scenarios without mental calculation errors.
+- **Trade-offs**: Ignores intermittent/flapping failure patterns (e.g. failure-success-failure), but guarantees rock-solid predictability.
+- **Example Scenario**: Stream of calls to `alpha`: `[error, error, ok, error, error]`.
+- **Expected Behavior**: Counter progression: $1 \rightarrow 2 \rightarrow 0 \rightarrow 1 \rightarrow 2$. Breaker remains `CLOSED`.
+- **Required Configuration Value**: Governed by `failure_threshold`.
+- **Mutation Risks**: Counter reset on success omitted or changed to decrement ($counter - 1$).
+- **Boundary Tests Needed**: Test alternating sequence `[fail, ok, fail, ok]` verifying counter never reaches 2.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
 ### Decision 4: Failure Threshold
-- **Question**: How many consecutive failures are required to trip the circuit breaker to `OPEN`?
-- **Options**:
-  - **Option A**: 3 consecutive failures.
-  - **Option B**: 5 consecutive failures.
-  - **Option C**: 1 failure (instant trip).
+- **Question**: How many consecutive failures are required to trip the circuit breaker from `CLOSED` to `OPEN`?
+- **Options considered**:
+  - **Option A**: `failure_threshold = 3` consecutive failures.
+  - **Option B**: `failure_threshold = 5` consecutive failures.
+  - **Option C**: `failure_threshold = 1` consecutive failure (instant trip).
 - **Advantages**:
-  - *Option A*: Industry standard balance: filters out transient single blips while quickly reacting to sustained outages.
+  - *Option A*: Canonical resilience engineering default: filters out transient single/double blips while reacting swiftly to real outages.
 - **Disadvantages**:
-  - *Option C* causes hyperactive tripping; *Option B* delays outage isolation.
-- **Recommended Option**: **Option A** (`failure_threshold = 3`, configurable in `config.json`).
-- **Reason**: 3 consecutive failures is clean, easy to mentally track in scenarios, and effectively isolates down providers.
-- **Trade-offs**: Tunable via `config.json` without modifying logic.
-- **Example Scenario**: Provider `alpha` experiences 3 consecutive timeouts.
-- **Expected Behavior**: On the 3rd failure, the breaker trips to `OPEN`, recording `opened_at` timestamp. The 4th call is refused.
+  - *Option C* is overly sensitive (tripping on single blips); *Option B* delays outage containment.
+- **Recommendation**: **Option A** (`failure_threshold = 3`, configurable in `config.json`) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: 3 consecutive failures is easy to track, quick to test, and standard in production gateway architectures.
+- **Trade-offs**: Tunable via `config.json` without modifying code logic.
+- **Example Scenario**: Provider `beta` experiences 3 consecutive timeouts at $T_1, T_2, T_3$.
+- **Expected Behavior**: On the 3rd failure, the breaker trips to `OPEN`, recording `opened_at = T_3`. The 4th call at $T_4$ is refused.
 - **Required Configuration Value**: `failure_threshold` (integer, e.g. `3`).
-- **Mutation Risks**: Changing `>= failure_threshold` to `> failure_threshold` or modifying default threshold.
-- **Boundary Tests Needed**: Test with exactly 2 failures (remains `CLOSED`), exactly 3 failures (trips to `OPEN`), and 4th call (refused).
-- **Source**: Our policy decision
+- **Mutation Risks**: Mutating `>= failure_threshold` to `>` or threshold $\pm 1$.
+- **Boundary Tests Needed**: Sequences of exactly 2 failures (remains `CLOSED`), exactly 3 failures (trips `OPEN`), and 4th call (refused).
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 5: Failure Evaluation Window
-- **Question**: Over what time window is the consecutive failure metric evaluated?
-- **Options**:
-  - **Option A**: **Continuous sequence window** (consecutive count persists across call sequence until a healthy call or breaker trip occurs).
-  - **Option B**: **Time-bounded consecutive window** (failures expire if more than $T$ seconds pass between calls).
+### Decision 5: Failure Window Semantics
+- **Question**: How does time windowing apply if consecutive failures are chosen?
+- **Options considered**:
+  - **Option A**: **Pure sequential window** (consecutive count persists across call sequence regardless of time delta until reset by a fast success or breaker trip).
+  - **Option B**: **Time-decayed consecutive window** (failures expire if interval between consecutive calls exceeds $T_{\text{decay}}$).
 - **Advantages**:
-  - *Option A*: Eliminates time-decay ambiguity, perfectly deterministic across sparse or batch logs.
+  - *Option A*: Eliminates time-decay ambiguity and arbitrary decay parameters; 100% deterministic across both fast streams and sparse batch logs.
 - **Disadvantages**:
-  - *Option B* adds timestamp subtraction logic that can introduce boundary mutations.
-- **Recommended Option**: **Option A** (Continuous sequence window based on consecutive calls).
-- **Reason**: Keeps the state machine pure, deterministic, and easily predictable.
-- **Trade-offs**: Consecutive failures separated by time still count if no success occurred between them.
-- **Example Scenario**: Two errors separated by 1 hour, followed immediately by a third error.
-- **Expected Behavior**: Breaker trips on the 3rd error.
-- **Required Configuration Value**: None beyond `failure_threshold`.
-- **Mutation Risks**: Inadvertent time-decay logic insertion.
-- **Boundary Tests Needed**: Sequential errors with varying time deltas verifying unbroken counting.
-- **Source**: Our policy decision
+  - *Option B* introduces time-subtraction logic and edge cases when timestamps have long gaps.
+- **Recommendation**: **Option A** (Pure sequential consecutive counting; time window parameter is unnecessary) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Maximizes determinism and removes time-drift vulnerabilities during offline log processing.
+- **Trade-offs**: Two errors separated by an hour with no intervening calls still count as 2 consecutive failures.
+- **Example Scenario**: Error at 10:00:00, error at 11:00:00, error at 12:00:00 (no other calls).
+- **Expected Behavior**: Breaker trips `OPEN` on the 3rd error at 12:00:00.
+- **Required Configuration Value**: None (pure sequential count).
+- **Mutation Risks**: Inadvertent introduction of unconfigured time decay.
+- **Boundary Tests Needed**: Assert consecutive failures separated by large time intervals increment counter identically to rapid bursts.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 6: Circuit Breaker Scope
-- **Question**: Should circuit breaker state machines be tracked per-provider or globally?
-- **Options**:
-  - **Option A**: **Per-provider scope** (each provider has an isolated FSM).
-  - **Option B**: **Global scope** (all providers share one state machine).
+### Decision 6: Circuit Breaker Scope & Provider Isolation
+- **Question**: Should circuit breaker state machines be tracked per-provider or globally across all providers?
+- **Options considered**:
+  - **Option A**: **Per-provider scope** (each provider maintains an isolated state machine, counter, and timers).
+  - **Option B**: **Global scope** (all providers share one global state machine).
 - **Advantages**:
-  - *Option A*: Essential for multi-provider routing: an outage in `alpha` does not disrupt healthy calls to `beta`.
+  - *Option A*: Mandatory for multi-provider routing: an outage in `alpha` must never block healthy calls to `beta` or `gamma`.
 - **Disadvantages**:
-  - *Option B* would shut down all providers if one fails, violating basic gateway design.
-- **Recommended Option**: **Option A** (Per-provider scope).
-- **Reason**: Mandatory for real-world reliability; upstream providers fail independently.
-- **Trade-offs**: State is maintained in a provider-keyed dictionary.
-- **Example Scenario**: `alpha` fails 3 times and trips `OPEN`. `beta` receives a call.
-- **Expected Behavior**: Call to `beta` is allowed (`attempt`) and `beta` state is `CLOSED`. Call to `alpha` is refused.
+  - *Option B* would cause catastrophic blast radius, shutting down entire gateway if one provider fails.
+- **Recommendation**: **Option A** (Per-provider isolation) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Upstream LLM providers are independent external vendors; isolating health tracking per provider is fundamental to gateway design.
+- **Trade-offs**: Requires dictionary-based state tracking per provider ID.
+- **Example Scenario**: Stream: `[alpha_err, alpha_err, alpha_err, beta_ok, alpha_call]`.
+- **Expected Behavior**: `alpha` trips `OPEN` on call 3. `beta_ok` is accepted as `attempt` in `CLOSED` state. Call 5 to `alpha` is refused.
 - **Required Configuration Value**: None (structural architecture).
-- **Mutation Risks**: Global state leakage or sharing state instances between provider keys.
-- **Boundary Tests Needed**: Interleaved calls `[alpha_err, beta_ok, alpha_err, beta_ok, alpha_err]` verifying `alpha` is `OPEN` while `beta` remains `CLOSED`.
-- **Source**: Our policy decision
+- **Mutation Risks**: Leaking state between provider keys or using a global counter singleton.
+- **Boundary Tests Needed**: Interleaved calls across multiple providers verifying state mutations in one provider never affect another.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 7: New / Unseen Provider Behavior
-- **Question**: What initial state and policy assumptions apply when a call is encountered for a provider not seen before?
-- **Options**:
-  - **Option A**: Initialize to `CLOSED` (healthy) with consecutive failures = 0.
+### Decision 7: New / Unseen Provider Handling
+- **Question**: What is the initial state and policy when a provider name appears for the very first time in the log?
+- **Options considered**:
+  - **Option A**: Initialize to `CLOSED` (healthy) with `consecutive_failures = 0`.
   - **Option B**: Initialize to `HALF_OPEN` (probe required).
   - **Option C**: Reject unknown provider.
 - **Advantages**:
-  - *Option A*: Optimistic discovery; allows seamless addition of new providers without prior registration.
+  - *Option A*: Optimistic discovery; allows dynamic introduction of new providers without static pre-registration.
 - **Disadvantages**:
   - *Option C* requires predefined provider whitelists not specified in the BRIEF.
-- **Recommended Option**: **Option A** (Initialize to `CLOSED` with 0 failures).
+- **Recommendation**: **Option A** (Initialize to `CLOSED` with 0 failures) — `RECOMMENDATION — REQUIRES REVIEW`.
 - **Reason**: Standard gateway behavior: new upstreams are assumed healthy until evidence shows otherwise.
-- **Trade-offs**: First call is allowed as normal traffic.
-- **Example Scenario**: First appearance of provider `"gamma"`.
-- **Expected Behavior**: Provider state initialized to `CLOSED`, call evaluated as `attempt`.
+- **Trade-offs**: The first call is allowed as normal traffic.
+- **Example Scenario**: First appearance of provider `"deepseek"`.
+- **Expected Behavior**: Provider initialized in `CLOSED` state, call processed normally as `attempt`.
 - **Required Configuration Value**: None.
 - **Mutation Risks**: Defaulting to `OPEN` or failing on dictionary key lookup.
-- **Boundary Tests Needed**: Assert first call to a new provider name starts in `CLOSED` state.
-- **Source**: Our policy decision
+- **Boundary Tests Needed**: Assert first call to an unseen provider ID starts in `CLOSED` state.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
 ### Decision 8: OPEN / Stopped State Behavior
-- **Question**: When a provider's breaker is `OPEN`, what action is returned for incoming calls before cooldown expires?
-- **Options**:
+- **Question**: When a provider's breaker is `OPEN`, what action and state are emitted for incoming calls before cooldown expires?
+- **Options considered**:
   - **Option A**: `action: "refuse"`, `provider_state: "OPEN"`, `reason: "circuit_open_refusal"`.
   - **Option B**: `action: "give_up"`.
   - **Option C**: `action: "attempt"` with fallback.
 - **Advantages**:
-  - *Option A*: Explicitly signals refusal upfront without touching the network, directly fulfilling the BRIEF's goal to stop hammering.
+  - *Option A*: Explicitly signals refusal upfront without touching the network, directly fulfilling the BRIEF's goal to stop hammering failing providers.
 - **Disadvantages**:
   - None.
-- **Recommended Option**: **Option A** (`action: "refuse"`, `provider_state: "OPEN"`).
-- **Reason**: Clear, unambiguous vocabulary and aligns directly with the BRIEF's requirement to refuse unhealthy provider calls.
+- **Recommendation**: **Option A** (`action: "refuse"`, `provider_state: "OPEN"`, `reason: "circuit_open_refusal"`) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Perfectly aligns with the BRIEF's stated outcome *"refuse it outright because we'd already decided that provider was unhealthy"*.
 - **Trade-offs**: None.
-- **Example Scenario**: Call arrives 10 seconds after breaker tripped with `cooldown_ms = 30000`.
+- **Example Scenario**: Call arrives at $T = 15000\text{ms}$ after breaker opened at $T = 0\text{ms}$ with `cooldown_ms = 30000`.
 - **Expected Behavior**: Output: `{"id": "...", "action": "refuse", "provider_state": "OPEN", "reason": "circuit_open_refusal"}`.
 - **Required Configuration Value**: None beyond `cooldown_ms`.
-- **Mutation Risks**: Returning `attempt` instead of `refuse` or wrong state string.
-- **Boundary Tests Needed**: Assert calls arriving during `[opened_at, opened_at + cooldown_ms - 1ms]` are refused.
-- **Source**: Our policy decision
+- **Mutation Risks**: Returning `attempt` or `give_up` instead of `refuse`.
+- **Boundary Tests Needed**: Assert all calls arriving during `[opened_at, opened_at + cooldown_ms - 1ms]` produce `refuse`.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 9: Cooldown Duration
-- **Question**: How long does a provider remain in the `OPEN` state before allowing a probe call?
-- **Options**:
+### Decision 9: Cooldown Duration & Model
+- **Question**: How long does a provider remain in the `OPEN` state before allowing a recovery probe, and is the duration fixed or dynamic?
+- **Options considered**:
   - **Option A**: Fixed configurable duration in milliseconds (e.g. `cooldown_ms = 30000` / 30 seconds).
-  - **Option B**: Dynamic exponential cooldown per consecutive trip.
+  - **Option B**: Dynamic exponential cooldown per consecutive trip ($cooldown = base \times 2^{trips}$).
 - **Advantages**:
-  - *Option A*: Clean, predictable, easily verifiable in walkthroughs and test assertions.
+  - *Option A*: Clean, predictable, easily verifiable in test assertions and live walkthrough scenarios.
 - **Disadvantages**:
-  - *Option B* increases mental complexity during scenario prediction.
-- **Recommended Option**: **Option A** (Fixed configurable duration: `cooldown_ms = 30000`).
-- **Reason**: Simplicity, absolute determinism, and direct configurability via `config.json`.
-- **Trade-offs**: Does not escalate on repeated trips, but configurable.
+  - *Option B* increases mental complexity during walkthrough scenario prediction.
+- **Recommendation**: **Option A** (Fixed configurable duration: `cooldown_ms = 30000`) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Simplicity, absolute determinism, and direct externalization in `config.json`.
+- **Trade-offs**: Does not escalate on repeated trips, but can be configured to any value.
 - **Example Scenario**: Breaker trips at $T = 1000\text{ms}$ with `cooldown_ms = 30000`. Cooldown expires at $T = 31000\text{ms}$.
 - **Expected Behavior**: Call at $T = 30999\text{ms}$ is refused; call at $T = 31000\text{ms}$ transitions to probing.
 - **Required Configuration Value**: `cooldown_ms` (integer, e.g. `30000`).
 - **Mutation Risks**: Off-by-one comparisons (`<` vs `<=`).
-- **Boundary Tests Needed**: Calls at $T_{\text{cooldown}} - 1\text{ms}$ (`refuse`) and $T_{\text{cooldown}}$ (`probe`).
-- **Source**: Our policy decision
+- **Boundary Tests Needed**: Calls at $T_{\text{cooldown}} - 1\text{ms}$ (`refuse`) vs. $T_{\text{cooldown}}$ (`probe`).
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 10: HALF_OPEN Transition & Timing Boundary
-- **Question**: When does the transition from `OPEN` to `HALF_OPEN` occur, and what is the exact mathematical boundary?
-- **Options**:
-  - **Option A**: First incoming call at or after `current_time >= opened_at + cooldown_ms` triggers transition to `HALF_OPEN` and serves as the probe.
-  - **Option B**: Immediate background timer transition.
+### Decision 10: HALF_OPEN / Recovery Probe Transition
+- **Question**: When does a provider transition from `OPEN` to `HALF_OPEN`, how many probe calls are admitted, and what action is assigned?
+- **Options considered**:
+  - **Option A**: The first call arriving at or after `current_time >= opened_at + cooldown_ms` triggers transition to `HALF_OPEN` and is designated as the single probe (`action: "probe"`). All subsequent calls while probe is pending are refused.
+  - **Option B**: Allow multiple concurrent probes in `HALF_OPEN`.
+  - **Option C**: Automatically transition to `CLOSED` immediately upon cooldown expiry without a probe.
 - **Advantages**:
-  - *Option A*: Discrete, event-driven, perfectly suited for deterministic offline log processing.
-- **Disadvantages**:
-  - None for batch/event stream processing.
-- **Recommended Option**: **Option A** (`current_time >= opened_at + cooldown_ms`).
-- **Reason**: Pure function of event timestamps; no asynchronous background threads or timers required.
-- **Trade-offs**: None.
-- **Example Scenario**: `opened_at = 10:00:00.000Z`, `cooldown_ms = 30000`. Next call arrives at `10:00:30.000Z`.
-- **Expected Behavior**: State becomes `HALF_OPEN`, call is designated as the probe.
-- **Required Configuration Value**: Governed by `cooldown_ms`.
-- **Mutation Risks**: Changing `>=` to `>`.
-- **Boundary Tests Needed**: Exact millisecond boundary test at `opened_at + cooldown_ms`.
-- **Source**: Our policy decision
-
----
-
-### Decision 11: Probe Behavior & Concurrency
-- **Question**: How many probe calls are permitted in `HALF_OPEN`, and what action is assigned?
-- **Options**:
-  - **Option A**: Exactly **one probe call** (`action: "probe"`, `provider_state: "HALF_OPEN"`). Any concurrent/interleaved calls arriving before the probe outcome are refused.
-  - **Option B**: Multiple concurrent probes.
-- **Advantages**:
-  - *Option A*: Strict isolation; prevents a flood of traffic while probing an unstable provider.
+  - *Option A*: Safely tests upstream recovery with a single isolated canary request; prevents traffic surges against an impaired upstream.
 - **Disadvantages**:
   - None.
-- **Recommended Option**: **Option A** (Single probe call).
-- **Reason**: Simplest, safest, and most predictable model.
-- **Trade-offs**: In sequential log processing, the single probe record directly dictates the next state transition.
-- **Example Scenario**: First record after cooldown arrives for provider in `HALF_OPEN`.
-- **Expected Behavior**: Action is `probe`, provider state is `HALF_OPEN`.
-- **Required Configuration Value**: None.
-- **Mutation Risks**: Allowing normal traffic before probe evaluation.
-- **Boundary Tests Needed**: Assert first call after cooldown has `action: "probe"`.
-- **Source**: Our policy decision
+- **Recommendation**: **Option A** (Single probe call on first arrival at `current_time >= opened_at + cooldown_ms`) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Classic, robust circuit breaker pattern: exactly one probe determines whether the circuit closes or reopens.
+- **Trade-offs**: In sequential event log processing, the probe record's outcome directly triggers the next state transition.
+- **Example Scenario**: `opened_at = 10:00:00.000Z`, `cooldown_ms = 30000`. Next call arrives at `10:00:30.000Z`.
+- **Expected Behavior**: Provider state becomes `HALF_OPEN`, call action is `probe`, reason is `probe_call_attempt`.
+- **Required Configuration Value**: Governed by `cooldown_ms`.
+- **Mutation Risks**: Changing `>=` to `>` or allowing normal `attempt` before probe completes.
+- **Boundary Tests Needed**: Call at exact millisecond `opened_at + cooldown_ms` must be `probe`.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 12: Probe Success Handling
-- **Question**: What happens to provider state and counters when a probe call succeeds (`status: "ok"` and `latency_ms <= slow_threshold_ms`)?
-- **Options**:
-  - **Option A**: State transitions immediately to `CLOSED`, `consecutive_failures` reset to 0, `cooldown_until` cleared, recorded stopped period closed.
-  - **Option B**: Require $M$ consecutive probe successes.
+### Decision 11: Successful Probe Handling
+- **Question**: What state transitions and counter resets occur when a probe call succeeds (`status: "ok"` and `latency_ms <= slow_threshold_ms`)?
+- **Options considered**:
+  - **Option A**: State transitions immediately to `CLOSED`, `consecutive_failures` resets to 0, cooldown timer clears, active stopped period is closed (`resumed_at = probe_timestamp`).
+  - **Option B**: Require $M$ consecutive probe successes before closing circuit.
 - **Advantages**:
-  - *Option A*: Clean, instantaneous recovery, simple mental prediction.
+  - *Option A*: Clear, deterministic, instantaneous recovery; stopped period duration is precisely bounded.
 - **Disadvantages**:
-  - Single probe recovery could re-expose if provider is flapping, but subsequent failure will trip it again quickly.
-- **Recommended Option**: **Option A** (Immediate recovery to `CLOSED`, counter reset to 0).
-- **Reason**: Maximum clarity and determinism.
-- **Trade-offs**: Fast recovery.
-- **Example Scenario**: Probe call returns `status: "ok"`, `latency_ms: 200`.
+  - Single probe recovery could quickly trip again if provider is fluttering, but subsequent failure will immediately protect the system.
+- **Recommendation**: **Option A** (Immediate recovery to `CLOSED`, reset failure counter to 0, close stopped period) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Maximum clarity and mental predictability during scenario prediction.
+- **Trade-offs**: Fast recovery after one confirmed success.
+- **Example Scenario**: Probe call returns `status: "ok"`, `latency_ms: 250`.
 - **Expected Behavior**: Output: `action: "probe"`, `provider_state: "CLOSED"`, `reason: "probe_success_recovery"`. Next call is standard `attempt`.
 - **Required Configuration Value**: None.
-- **Mutation Risks**: Forgetting to reset failure counter or leaving state in `HALF_OPEN`.
-- **Boundary Tests Needed**: Probe success followed immediately by 2 failures (must remain `CLOSED`) and 3rd failure (trips `OPEN`).
-- **Source**: Our policy decision
+- **Mutation Risks**: Omitting counter reset or failing to transition state back to `CLOSED`.
+- **Boundary Tests Needed**: Probe success followed by 2 errors (remains `CLOSED`) and 3rd error (trips `OPEN`).
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 13: Probe Failure Handling
-- **Question**: What happens when a probe call fails (error, timeout, or slow `ok`)?
-- **Options**:
-  - **Option A**: State transitions immediately back to `OPEN`, new cooldown window starts from `probe_started_at + cooldown_ms`, `consecutive_failures` maintained/incremented.
-  - **Option B**: Permanent disablement.
+### Decision 12: Failed Probe Handling
+- **Question**: What happens when a probe call fails (error, timeout, slow `ok`, or unknown status)?
+- **Options considered**:
+  - **Option A**: State transitions immediately back to `OPEN`, a new cooldown period starts from `probe_started_at + cooldown_ms`, `consecutive_failures` remains at/above threshold, stopped period continues.
+  - **Option B**: Permanent disablement until manual intervention.
 - **Advantages**:
-  - *Option A*: Protects provider for another full cooldown window.
+  - *Option A*: Protects the upstream provider for another full cooldown window without manual operator intervention.
 - **Disadvantages**:
   - None.
-- **Recommended Option**: **Option A** (Re-trip to `OPEN` with new cooldown).
-- **Reason**: Standard resilient backoff.
-- **Trade-offs**: Provider remains stopped for another full cooldown interval.
-- **Example Scenario**: Probe call returns `status: "timeout"`.
-- **Expected Behavior**: Output: `action: "probe"`, `provider_state: "OPEN"`, `reason: "probe_failure_reopen"`. Subsequent calls refused for another `cooldown_ms`.
+- **Recommendation**: **Option A** (Re-trip to `OPEN` with new cooldown starting from probe timestamp) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Standard resilient backoff: a failed probe confirms the provider is still down, warranting an extended cooldown.
+- **Trade-offs**: Extends the provider stopped duration.
+- **Example Scenario**: Probe call at $T = 30000\text{ms}$ returns `status: "timeout"`.
+- **Expected Behavior**: Output: `action: "probe"`, `provider_state: "OPEN"`, `reason: "probe_failure_reopen"`. Next cooldown expires at $T = 60000\text{ms}$. Calls between 30001ms and 59999ms are refused.
 - **Required Configuration Value**: Governed by `cooldown_ms`.
-- **Mutation Risks**: Resetting cooldown timer to old `opened_at` instead of probe timestamp.
-- **Boundary Tests Needed**: Verify second cooldown period extends from the probe call timestamp.
-- **Source**: Our policy decision
+- **Mutation Risks**: Resetting cooldown timer to the original `opened_at` instead of probe timestamp.
+- **Boundary Tests Needed**: Verify second cooldown period is evaluated relative to probe timestamp.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 14: Maximum Retries per Call
-- **Question**: How many retries are allowed for a single call?
-- **Options**:
-  - **Option A**: `max_retries = 1` (1 initial attempt + 1 retry = max 2 total executions).
-  - **Option B**: `max_retries = 2`.
+### Decision 13: Retry Count Budget
+- **Question**: What is the maximum number of retries permitted for a single call?
+- **Options considered**:
+  - **Option A**: `max_retries = 1` (1 initial attempt + 1 retry = max 2 total executions per call).
+  - **Option B**: `max_retries = 2` (1 initial + 2 retries = max 3 total executions).
   - **Option C**: `max_retries = 0` (no retries).
 - **Advantages**:
-  - *Option A*: Safe, limits downstream latency multiplication, easy to verify.
+  - *Option A*: Handles transient blips while strictly bounding tail latency overhead and preventing retry storms.
 - **Disadvantages**:
   - None; configurable via `config.json`.
-- **Recommended Option**: **Option A** (`max_retries = 1`, configurable).
-- **Reason**: 1 retry is standard for LLM gateways to handle transient blips without exploding latency.
+- **Recommendation**: **Option A** (`max_retries = 1`, configurable) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: 1 retry is standard for LLM gateways to handle transient blips without doubling upstream load.
 - **Trade-offs**: Configurable in `config.json`.
-- **Example Scenario**: A call fails with `timeout`. It has 0 previous retries.
-- **Expected Behavior**: Policy action is `retry`. If that retry fails, action becomes `give_up`.
+- **Example Scenario**: Call fails with `status: "timeout"`. Previous retry count is 0.
+- **Expected Behavior**: Policy action is `retry`. If that retry also fails, action becomes `give_up`.
 - **Required Configuration Value**: `max_retries` (integer, e.g. `1`).
-- **Mutation Risks**: `>= max_retries` mutated to `> max_retries`.
-- **Boundary Tests Needed**: Test with 0 retries (allows retry), 1 retry (triggers `give_up`).
-- **Source**: Our policy decision
+- **Mutation Risks**: Mutating `>= max_retries` to `>` or altering counter logic.
+- **Boundary Tests Needed**: Assert call with 0 retries produces `retry`; call with 1 retry produces `give_up`.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 15: Retry Eligibility
+### Decision 14: Retry Eligibility
 - **Question**: Which call outcomes are eligible for a retry attempt?
-- **Options**:
-  - **Option A**: Retry only on transient errors (`status: "error"` or `status: "timeout"`), provided target provider is not `OPEN` and retry budget remains. Never retry `ok` (even if slow) or unrecognized statuses.
+- **Options considered**:
+  - **Option A**: Retry only on transient failures (`status: "error"` or `status: "timeout"`), provided target provider is not `OPEN` and retry budget remains. Never retry `ok` (even if slow) or unrecognized statuses.
   - **Option B**: Retry all non-ok statuses including unrecognized ones.
   - **Option C**: Retry slow `ok` calls.
 - **Advantages**:
   - *Option A*: Prevents duplicate billing/generation on completed requests, avoids hammering open circuits.
 - **Disadvantages**:
   - None.
-- **Recommended Option**: **Option A** (Only transient `error` and `timeout` on healthy providers).
-- **Reason**: Logical correctness for model gateway operations.
-- **Trade-offs**: Non-transient or completed calls are never retried.
-- **Example Scenario**: A call to `alpha` returns `timeout` while `alpha` is `CLOSED`.
-- **Expected Behavior**: Evaluated as `retry`.
+- **Recommendation**: **Option A** (Only transient `error` and `timeout` on healthy providers) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Retrying a completed slow request causes duplicate execution; retrying against an open circuit defeats the purpose of the breaker.
+- **Trade-offs**: Strict eligibility criteria.
+- **Example Scenario**: Call to `alpha` returns `status: "ok"` with `latency_ms: 6000` (`slow_threshold_ms: 5000`).
+- **Expected Behavior**: Action is `attempt` (outcome accepted), NOT `retry`.
 - **Required Configuration Value**: None.
-- **Mutation Risks**: Retrying on `ok` or retrying when circuit is `OPEN`.
-- **Boundary Tests Needed**: Verify slow `ok` produces `attempt`, never `retry`.
-- **Source**: Our policy decision
+- **Mutation Risks**: Allowing retries on `ok` status or when circuit is `OPEN`.
+- **Boundary Tests Needed**: Assert slow `ok` produces `attempt`, never `retry`.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 16: Retry Delay & Backoff Strategy
+### Decision 15: Retry Delay & Backoff Strategy
 - **Question**: How is the delay between retries calculated?
-- **Options**:
+- **Options considered**:
   - **Option A**: Fixed deterministic delay (`retry_delay_ms = 1000`).
-  - **Option B**: Deterministic linear backoff ($delay = base \times retry$).
+  - **Option B**: Linear backoff ($delay = base \times retry$).
   - **Option C**: Exponential backoff ($delay = base \times 2^{retry-1}$).
 - **Advantages**:
   - *Option A*: Simplest, 100% deterministic, zero arithmetic rounding ambiguity during live walkthrough predictions.
 - **Disadvantages**:
-  - Fixed delay doesn't scale for large retry counts, but with `max_retries = 1`, fixed delay is ideal.
-- **Recommended Option**: **Option A** (Fixed deterministic delay: `retry_delay_ms = 1000`).
-- **Reason**: Predictability and simplicity.
-- **Trade-offs**: Constant delay.
+  - Fixed delay doesn't scale for large retry counts, but with `max_retries = 1`, fixed delay is optimal.
+- **Recommendation**: **Option A** (Fixed deterministic delay: `retry_delay_ms = 1000`) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Predictability, simplicity, and direct configurability.
+- **Trade-offs**: Constant delay across retries.
 - **Example Scenario**: Retry scheduled for a timed-out call.
-- **Expected Behavior**: Delay recorded/evaluated as exactly `1000ms`.
+- **Expected Behavior**: Delay evaluated as exactly `1000ms`.
 - **Required Configuration Value**: `retry_delay_ms` (integer, e.g. `1000`).
 - **Mutation Risks**: Arithmetic operator mutations.
 - **Boundary Tests Needed**: Assert retry delay matches `retry_delay_ms` exactly.
-- **Source**: Our policy decision
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
-### Decision 17: Timing & Backoff Determinism (Jitter Policy)
-- **Question**: How do we handle backoff jitter while obeying the strict determinism rule?
-- **Options**:
-  - **Option A**: **No jitter** (pure fixed/deterministic timing).
-  - **Option B**: Deterministic seeded pseudo-random jitter (using seeded PRNG based on record ID or fixed seed).
+### Decision 16: Retry and Circuit Breaker Interaction
+- **Question**: How do retries interact with provider health state, failure counting, and circuit breaker tripping?
+- **Options considered**:
+  - **Option A**: **Unified Health Accounting**:
+    1. Every failed attempt/retry to a provider counts as a failure toward that provider's `consecutive_failures`.
+    2. Any successful attempt/retry resets `consecutive_failures` to 0.
+    3. If a call failure causes the provider to trip to `OPEN`, any pending retry for that call is aborted/refused (`give_up` / `refuse`).
+    4. Refused calls (calls rejected while circuit is `OPEN`) do NOT increment `consecutive_failures` (they are dropped upfront without touching the provider).
+  - **Option B**: Separate retry failures from circuit breaker health accounting.
 - **Advantages**:
-  - *Option A*: Eliminates all pseudo-randomness, guarantees identical reproduction across every platform, architecture, and Python version.
+  - *Option A*: Fully coherent: provider health reflects every actual interaction with the upstream provider, while refused calls do not cause artificial state changes.
 - **Disadvantages**:
-  - None for retrospective offline evaluation.
-- **Recommended Option**: **Option A** (Zero jitter / pure deterministic delay).
-- **Reason**: The BRIEF states: *"A non-deterministic engine cannot be graded and cannot be trusted."* Pure deterministic timing eliminates all seed drift risks.
-- **Trade-offs**: No jitter, but perfectly deterministic.
-- **Example Scenario**: Re-running the engine 100 times on the same input.
-- **Expected Behavior**: Byte-for-byte identical output every time.
-- **Required Configuration Value**: None.
-- **Mutation Risks**: Introducing unseeded `random.random()`.
-- **Boundary Tests Needed**: Run engine twice on same dataset and assert exact hash equality.
-- **Source**: Our policy decision
+  - Requires clear sequencing between call retry evaluation and provider state update.
+- **Recommendation**: **Option A** (Unified Health Accounting) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: Logically sound and defensible: if an upstream provider fails a retry, it really failed, so the failure count must increment. If a circuit is open, refusing a call does not hammer the provider, so it does not add new failures.
+- **Trade-offs**: Clear, consistent interaction rules.
+- **Example Scenario**: Call 1 fails (count 1, retried). Retry fails (count 2, gives up). Call 2 fails (count 3 -> trips `OPEN`). Call 3 arrives (refused, count stays 3).
+- **Expected Behavior**: Call 1 produces `retry` then `give_up`. Call 2 trips breaker. Call 3 is `refuse`.
+- **Required Configuration Value**: None beyond `failure_threshold` and `max_retries`.
+- **Mutation Risks**: Incrementing failure counter on refused calls or omitting failure increment on retry failures.
+- **Boundary Tests Needed**: Test sequence where retry failure triggers circuit breaker trip.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
+
+---
+
+### Decision 17: Provider State vs. Call State Separation
+- **Question**: How are per-call data, per-provider health state, and system configuration isolated?
+- **Specification**:
+  - **Call Level (Ephemera)**: `id`, `provider`, `started_at`, `status`, `latency_ms`, `call_retry_count`, decided `action`, decided `reason`.
+  - **Provider Level (Stateful Entity)**: `provider_id`, `state` (`CLOSED`, `OPEN`, `HALF_OPEN`), `consecutive_failures`, `opened_at`, `cooldown_until`, `stopped_intervals` list.
+  - **System Level (Immutable Configuration)**: `failure_threshold`, `cooldown_ms`, `slow_threshold_ms`, `max_retries`, `retry_delay_ms`.
+- **Advantages**:
+  - Clean separation of concerns; eliminates global state leakage and thread/instance coupling.
+- **Recommendation**: Adopt this strict 3-tier hierarchy — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
 ### Decision 18: Unknown / Unrecognized Status Handling
-- **Question**: What should the engine do if a record arrives with an unrecognized status (e.g. `"rate_limited"`, `"502_bad_gateway"`, `"null"`)?
-- **Options**:
-  - **Option A**: Fail-safe policy: treat as an unretryable failure (increments provider consecutive failure count, returns `action: "attempt"`, `reason: "unrecognized_status_failure"`).
+- **Question**: What should the engine do if a record arrives with an unrecognized status (not `ok`, `error`, `timeout`)?
+- **Options considered**:
+  - **Option A**: Treat as an unretryable failure (increments provider consecutive failure count, returns `action: "attempt"`, `reason: "unrecognized_status_failure"`).
   - **Option B**: Raise an unhandled exception / crash.
-  - **Option C**: Drop/ignore the record.
+  - **Option C**: Ignore/drop the record.
 - **Advantages**:
-  - *Option A*: Preserves 1:1 input/output cardinality, does not crash on unseen data, and protects the system by treating unknown signals as failures.
+  - *Option A*: Preserves 1:1 input/output line cardinality, handles anomalous data safely without crashing, and protects the system by treating unknown signals as failures.
 - **Disadvantages**:
-  - None; handles anomalous logs gracefully.
-- **Recommended Option**: **Option A** (Treat as unretryable failure, preserve 1:1 ordering).
-- **Reason**: The BRIEF states: *"you should assume you will eventually be handed something that isn't [ok, error, timeout]"* and mandates exactly one output line per input line.
+  - None.
+- **Recommendation**: **Option A** (Treat as unretryable failure, preserve 1:1 ordering) — `RECOMMENDATION — REQUIRES REVIEW`.
+- **Reason**: The BRIEF warns that unrecognized statuses will appear and strictly mandates 1:1 input-to-output record mapping.
 - **Trade-offs**: Unknown statuses degrade provider health.
-- **Example Scenario**: Input `{"id":"c999","status":"unknown_code","latency_ms":100}`.
-- **Expected Behavior**: Output `action: "attempt"`, `reason: "unrecognized_status_failure"`, failure counter increments.
+- **Example Scenario**: Input `{"id": "c999", "status": "rate_limited_429", "latency_ms": 100}`.
+- **Expected Behavior**: Output `action: "attempt"`, `reason: "unrecognized_status_failure"`, failure counter increments by 1.
 - **Required Configuration Value**: None.
-- **Mutation Risks**: Swallowing unknown statuses as successes or crashing.
+- **Mutation Risks**: Treating unknown statuses as `ok` or crashing.
 - **Boundary Tests Needed**: Pass unknown status string and assert output line generated with failure count increment.
-- **Source**: Our policy decision
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
 ### Decision 19: Out-of-Order Timestamps Handling
 - **Question**: How should the engine handle logs where `started_at` timestamps are non-chronological or out-of-order?
-- **Options**:
-  - **Option A**: **Arrival order processing** (process records sequentially in the order they appear in the file; evaluate cooldowns against highest observed timestamp or current record timestamp).
-  - **Option B**: Pre-sort the input file by timestamp in memory.
+- **Options considered**:
+  - **Option A**: **Arrival order processing** (process records strictly in the order they appear in `outcomes.jsonl`; evaluate cooldowns against monotonic maximum observed timestamp: `current_time = max(max_seen_timestamp, record_timestamp)`).
+  - **Option B**: Pre-sort all records by timestamp in memory.
   - **Option C**: Reject out-of-order records.
 - **Advantages**:
-  - *Option A*: Strictly preserves the required 1:1 input-order matching in `decisions.jsonl` without reordering overhead.
+  - *Option A*: Strictly preserves the required 1:1 input-order matching in `decisions.jsonl` without reordering overhead. Monotonic timestamp tracking prevents time from moving backward during cooldown evaluation.
 - **Disadvantages**:
-  - If a timestamp goes backward, cooldown comparisons use monotonic time tracking (`max(highest_timestamp, record_timestamp)`).
-- **Recommended Option**: **Option A** (Process in input arrival order; maintain monotonic maximum timestamp for time progression).
+  - None.
+- **Recommendation**: **Option A** (Process in arrival order with monotonic time tracking) — `RECOMMENDATION — REQUIRES REVIEW`.
 - **Reason**: Satisfies the hard requirement that `decisions.jsonl` must be generated in exact input order.
 - **Trade-offs**: State transitions reflect stream arrival sequence.
 - **Example Scenario**: Record 1 at 10:00:05, Record 2 at 10:00:01.
 - **Expected Behavior**: Record 1 processed first, Record 2 processed second in output.
 - **Required Configuration Value**: None.
-- **Mutation Risks**: Reordering output lines.
+- **Mutation Risks**: Reordering output lines or regressing cooldown timers.
 - **Boundary Tests Needed**: Pass non-monotonic timestamp inputs and assert output preserves exact input sequence.
-- **Source**: Our policy decision
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
@@ -446,12 +463,13 @@
 - **Question**: What is the exact, fixed vocabulary for the `action` field in `decisions.jsonl`?
 - **Vocabulary**:
   - `attempt`: Normal execution of an API call to a healthy provider.
-  - `retry`: Re-issuing an eligible failed call.
+  - `retry`: Re-issuing an eligible failed call within retry budget.
   - `give_up`: Abandoning further execution after retry exhaustion or non-retryable failure.
-  - `refuse`: Rejecting a call upfront because the provider's circuit is `OPEN`.
-  - `probe`: Testing an unhealthy provider after cooldown expiry during `HALF_OPEN`.
-- **Reason**: Covers all 4 outcomes required by the BRIEF plus the formal circuit-breaker probe state.
-- **Source**: Our policy decision
+  - `refuse`: Rejecting a call upfront because provider circuit is `OPEN`.
+  - `probe`: Test call admitted during `HALF_OPEN` state after cooldown expiry.
+- **Reason**: Covers all 4 outcomes mentioned in the BRIEF plus the canonical circuit-breaker probe state.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
@@ -462,36 +480,24 @@
   - `OPEN`: Provider is unhealthy; calls are refused.
   - `HALF_OPEN`: Cooldown expired; provider is evaluating a single probe call.
 - **Reason**: Standard, mathematically rigorous 3-state Circuit Breaker model.
-- **Source**: Our policy decision
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
 
 ---
 
 ### Decision 22: Controlled Reason Vocabulary
 - **Question**: What is the exact, fixed vocabulary for the `reason` field in `decisions.jsonl`?
 - **Vocabulary**:
-  - `healthy_call_attempt`: Normal call to a healthy provider.
-  - `probe_call_attempt`: Test call during `HALF_OPEN` state.
+  - `healthy_call_attempt`: Normal call executed to a healthy provider.
+  - `probe_call_attempt`: Probe call executed during `HALF_OPEN` state.
   - `probe_success_recovery`: Successful probe restoring provider to `CLOSED`.
   - `probe_failure_reopen`: Failed probe tripping provider back to `OPEN`.
-  - `circuit_open_refusal`: Call rejected because breaker is `OPEN`.
+  - `circuit_open_refusal`: Call refused because provider circuit is currently `OPEN`.
   - `transient_error_retry`: Call failed with error and is eligible for retry.
   - `timeout_retry`: Call timed out and is eligible for retry.
-  - `max_retries_exceeded`: Call failed after exhausting retry budget.
+  - `max_retries_exceeded`: Call failed after exhausting all allowed retries.
   - `slow_success_degradation`: Call succeeded but exceeded latency threshold.
-  - `unrecognized_status_failure`: Unrecognized status treated as unretryable failure.
-- **Reason**: Exhaustive, deterministic explanation codes covering every possible branch.
-- **Source**: Our policy decision
-
----
-
-### Decision 23: Second Output Schema (Stopped Periods Report)
-- **Question**: What is the exact filename and structure for the second output showing stopped periods per provider?
-- **Options**:
-  - **Option A**: `stopped_periods.json` — A JSON file containing a dictionary mapping each provider to a list of stopped interval objects `[{"stopped_at": "...", "resumed_at": "...", "duration_ms": ...}]`.
-  - **Option B**: CSV report.
-- **Advantages**:
-  - *Option A*: Clean, machine-readable, directly serializable, exact timestamps.
-- **Recommended Option**: **Option A** (`stopped_periods.json`).
-- **Reason**: Clean JSON structure that unambiguously reports exact outage windows per provider.
-- **Trade-offs**: None.
-- **Source**: Our policy decision
+  - `unrecognized_status_failure`: Unrecognized status handled as unretryable failure.
+- **Reason**: Deterministic, human- and machine-readable explanation taxonomy covering every decision branch.
+- **Source**: Our policy analysis
+- **Status**: PENDING REVIEW
