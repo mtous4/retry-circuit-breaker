@@ -44,10 +44,10 @@ Example record:
 - **Source**: BRIEF
 
 ## Configuration
-All behavioral thresholds, time windows, retry limits, and cooldown durations must be externalized into a single configuration file (e.g., `config.json`). 
+All behavioral thresholds, time windows, retry limits, and cooldown durations must be externalized into a single configuration file (`config.json`). 
 
 - **Rule**: Absolutely no tunable values or policy thresholds may be hardcoded into implementation logic.
-- **Format**: File format is our choice, but must fully capture all parameters needed by the policy engine.
+- **Format**: JSON format capturing all parameters needed by the policy engine.
 
 - **Source**: BRIEF
 
@@ -59,24 +59,24 @@ The engine must produce two required outputs:
 - Output records must preserve the exact input order.
 - Each record must contain at least:
   - `id` (string): Matching the input record ID.
-  - `action` (string): The policy action taken.
-  - `provider_state` (string): The health state of the provider when evaluated.
+  - `action` (string): The policy action taken (`attempt`, `retry`, `give_up`, `refuse`, `probe`).
+  - `provider_state` (string): The health state of the provider when evaluated (`CLOSED`, `OPEN`, `HALF_OPEN`).
   - `reason` (string): Deterministic rationale for the action taken.
 
 Example structure:
 ```json
-{"id":"c001","action":"...","provider_state":"...","reason":"..."}
+{"id":"c001","action":"attempt","provider_state":"CLOSED","reason":"healthy_call_attempt"}
 ```
 
-The vocabulary for `action`, `provider_state`, and `reason` is defined by us in `POLICY.md`. Once documented, it is fixed and immutable.
+The vocabulary for `action`, `provider_state`, and `reason` is strictly defined in `POLICY.md`. Once documented, it is fixed and immutable.
 
 - **Source**: BRIEF
 
-### 2. Provider Outage / Stopped Periods Report
+### 2. Provider Outage / Stopped Periods Report (`stopped_periods.json`)
 - A second output showing, per provider, the exact time periods during which the engine stopped calling each provider and when calling resumed.
-- Filename, structure, and schema are ours to define in `POLICY.md`.
+- Structured JSON format defined in `POLICY.md`.
 
-- **Source**: BRIEF
+- **Source**: BRIEF & Our policy decision
 
 ## Hard Requirements
 The following requirements are explicitly mandated by the BRIEF:
@@ -93,28 +93,28 @@ The following requirements are explicitly mandated by the BRIEF:
 
 - **Source**: BRIEF
 
-## What We Need To Decide
-The BRIEF explicitly leaves all policy behavior decisions to us. We must deliberately decide, specify, and justify answers to the following 19 questions in `POLICY.md`:
+## Policy Decisions Summary (Formalized in `POLICY.md`)
+The 19 policy dimensions left to our decision by the BRIEF have been fully decided, approved, and formalized in `POLICY.md`:
 
-1. **What counts as a failure?** *(TO BE DECIDED)*
-2. **Is a slow success considered a failure?** *(TO BE DECIDED)*
-3. **Is a timeout treated differently from an explicit error?** *(TO BE DECIDED)*
-4. **How many failures trigger the circuit breaker to open?** *(TO BE DECIDED)*
-5. **What time window or evaluation interval is used?** *(TO BE DECIDED)*
-6. **Is the threshold count-based, rate-based, or sliding-window-based?** *(TO BE DECIDED)*
-7. **Is the circuit breaker scoped per provider or globally?** *(TO BE DECIDED)*
-8. **What happens when a provider has never been seen before?** *(TO BE DECIDED)*
-9. **How long does a provider remain stopped (cooldown duration)?** *(TO BE DECIDED)*
-10. **What happens after the cooldown expires?** *(TO BE DECIDED)*
-11. **Is probing handled via a single probe request or multiple probe calls?** *(TO BE DECIDED)*
-12. **What happens if a probe call succeeds?** *(TO BE DECIDED)*
-13. **What happens if a probe call fails?** *(TO BE DECIDED)*
-14. **How many retries are allowed per call?** *(TO BE DECIDED)*
-15. **What is the initial retry delay?** *(TO BE DECIDED)*
-16. **How is backoff calculated (constant, linear, exponential)?** *(TO BE DECIDED)*
-17. **How is retry backoff kept strictly deterministic?** *(TO BE DECIDED)*
-18. **What happens when a record with an unknown status is encountered?** *(TO BE DECIDED)*
-19. **What happens when records arrive with out-of-order timestamps?** *(TO BE DECIDED)*
+1. **Failure Definition**: Explicit errors, timeouts, slow successes (`latency_ms > slow_threshold_ms`), and unrecognized statuses.
+2. **Slow Success Handling**: Delivered as `attempt` (outcome accepted), but increments consecutive failure count.
+3. **Timeout vs. Error**: Handled identically for failure counting; distinct reason codes for transparency.
+4. **Failure Threshold**: Configurable threshold (default `3` consecutive failures) triggering `CLOSED -> OPEN`.
+5. **Failure Metric & Window**: Continuous consecutive sequence (resets to 0 on any fast success).
+6. **Breaker Scope**: Strict per-provider state isolation.
+7. **New Provider**: Initialized to `CLOSED` with 0 failures.
+8. **OPEN State**: Refuses incoming calls (`action: "refuse"`, `reason: "circuit_open_refusal"`).
+9. **Cooldown**: Configurable duration (default `30000ms` / 30s) during which calls are refused.
+10. **HALF_OPEN Transition**: First call arriving at `current_time >= opened_at + cooldown_ms` becomes the single probe.
+11. **Probe Strategy**: Exactly one probe call evaluated; other calls refused while pending.
+12. **Probe Success**: Restores state to `CLOSED`, resets failure count to 0, closes stopped period.
+13. **Probe Failure**: Re-trips to `OPEN` with new cooldown starting from probe timestamp.
+14. **Max Retries**: Configurable limit (default `1` retry; max 2 total attempts per call).
+15. **Retry Eligibility**: Only transient errors and timeouts on `CLOSED` providers within retry budget.
+16. **Retry Delay**: Configurable fixed deterministic delay (default `1000ms`).
+17. **Determinism & Jitter**: Zero jitter / pure deterministic delay.
+18. **Unknown Status**: Handled as unretryable failure (`action: "attempt"`, increments failure count).
+19. **Stream Sequencing**: Processed in input arrival order with monotonic maximum timestamp tracking.
 
 ## Important Distinction
 
@@ -124,7 +124,7 @@ To maintain strict specification discipline, the project separates context into 
 Hard constraints imposed by the assignment that cannot be changed or relaxed (e.g., fixed JSONL fields, 1:1 input/output ordering, file-based execution, determinism, testability on clean clone, mutation-testing resilience).
 
 ### Tier B: Our Policy Decisions
-Intentional engineering choices that we formulate, justify, document in `POLICY.md`, and implement in the engine (e.g., failure classification, retry budgets, circuit breaker thresholds, probe policies, output schema for stopped periods). These are never attributed to the instructor.
+Intentional engineering choices that we formulated, justified, documented in `POLICY.md`, and will implement in the engine (e.g., failure classification, retry budgets, circuit breaker thresholds, probe policies, output schema for stopped periods). These are never attributed to the instructor.
 
 ### Tier C: Assignment Inquiries
 Questions regarding grading mechanics or external evaluation constraints if genuine ambiguity exists in the BRIEF.
