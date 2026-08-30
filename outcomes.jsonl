@@ -1,1 +1,8 @@
-
+{"id":"c001","provider":"alpha","started_at":"2026-09-01T10:00:00.000Z","status":"ok","latency_ms":420}
+{"id":"c002","provider":"alpha","started_at":"2026-09-01T10:00:01.000Z","status":"error","latency_ms":100}
+{"id":"c003","provider":"alpha","started_at":"2026-09-01T10:00:02.000Z","status":"error","latency_ms":110}
+{"id":"c004","provider":"alpha","started_at":"2026-09-01T10:00:03.000Z","status":"timeout","latency_ms":5000}
+{"id":"c005","provider":"beta","started_at":"2026-09-01T10:00:04.000Z","status":"ok","latency_ms":250}
+{"id":"c006","provider":"alpha","started_at":"2026-09-01T10:00:15.000Z","status":"ok","latency_ms":200}
+{"id":"c007","provider":"alpha","started_at":"2026-09-01T10:00:33.000Z","status":"ok","latency_ms":250}
+{"id":"c008","provider":"alpha","started_at":"2026-09-01T10:00:34.000Z","status":"ok","latency_ms":300}

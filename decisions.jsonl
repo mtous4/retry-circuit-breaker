@@ -1,0 +1,8 @@
+{"id": "c001", "action": "attempt", "provider_state": "CLOSED", "reason": "healthy_call_attempt"}
+{"id": "c002", "action": "retry", "provider_state": "CLOSED", "reason": "transient_error_retry"}
+{"id": "c003", "action": "retry", "provider_state": "CLOSED", "reason": "transient_error_retry"}
+{"id": "c004", "action": "give_up", "provider_state": "OPEN", "reason": "max_retries_exceeded"}
+{"id": "c005", "action": "attempt", "provider_state": "CLOSED", "reason": "healthy_call_attempt"}
+{"id": "c006", "action": "refuse", "provider_state": "OPEN", "reason": "circuit_open_refusal"}
+{"id": "c007", "action": "probe", "provider_state": "CLOSED", "reason": "probe_success_recovery"}
+{"id": "c008", "action": "attempt", "provider_state": "CLOSED", "reason": "healthy_call_attempt"}

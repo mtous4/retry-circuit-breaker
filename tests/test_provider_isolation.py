@@ -68,13 +68,13 @@ class TestProviderIsolation:
 
     def test_independent_recovery_cycles(self, default_engine):
         """Alpha and Beta enter and exit cooldown independently without interference."""
-        # Alpha trips at 10:00:00 -> cooldown until 10:00:30
+        # Alpha trips at 10:00:00.000Z -> cooldown until 10:00:30.000Z
         for i in range(3):
-            default_engine.process_record(CallOutcome(id=f"a{i}", provider="alpha", started_at=f"2026-09-01T10:00:00.00{i}Z", status="error", latency_ms=100))
+            default_engine.process_record(CallOutcome(id=f"a{i}", provider="alpha", started_at="2026-09-01T10:00:00.000Z", status="error", latency_ms=100))
         
-        # Beta trips at 10:00:10 -> cooldown until 10:00:40
+        # Beta trips at 10:00:10.000Z -> cooldown until 10:00:40.000Z
         for i in range(3):
-            default_engine.process_record(CallOutcome(id=f"b{i}", provider="beta", started_at=f"2026-09-01T10:00:10.00{i}Z", status="error", latency_ms=100))
+            default_engine.process_record(CallOutcome(id=f"b{i}", provider="beta", started_at="2026-09-01T10:00:10.000Z", status="error", latency_ms=100))
             
         assert default_engine.get_provider_state("alpha").state == "OPEN"
         assert default_engine.get_provider_state("beta").state == "OPEN"

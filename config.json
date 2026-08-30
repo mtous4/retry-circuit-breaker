@@ -1,1 +1,7 @@
-{}
+{
+  "failure_threshold": 3,
+  "cooldown_ms": 30000,
+  "slow_threshold_ms": 5000,
+  "max_retries": 1,
+  "retry_delay_ms": 1000
+}

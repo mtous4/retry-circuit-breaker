@@ -1,4 +1,4 @@
-"""
+r"""
 Tests for Failure Classification and Latency Boundaries (Category A & B).
 Derived strictly from docs/POLICY.md §3.1, §3.2, §5.3 and docs/SCENARIOS.md.
 
