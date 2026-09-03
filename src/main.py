@@ -6,6 +6,12 @@ Executes the full pipeline from outcomes.jsonl + config.json to decisions.jsonl 
 import argparse
 import sys
 from pathlib import Path
+
+# Ensure project root is in sys.path so both `python -m src.main` and `python src/main.py` work
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.config import PolicyConfig
 from src.engine import PolicyEngine
 from src.reporter import write_decisions_jsonl, write_stopped_periods_json
