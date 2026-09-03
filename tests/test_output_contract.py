@@ -94,3 +94,22 @@ class TestOutputContract:
                 baseline_results = run_decisions
             else:
                 assert run_decisions == baseline_results, f"Non-deterministic divergence on run {run_idx}"
+
+    def test_process_file_preserves_input_line_order_exactly(self, default_config, make_outcomes_file):
+        """
+        BRIEF Hard Rule: engine.process_file MUST evaluate records in exact input order and return decisions in identical order.
+        Target Mutation: Reversing or shuffling decisions list inside process_file.
+        """
+        records = [
+            {"id": f"rec_{i:03d}", "provider": "alpha", "started_at": f"2026-09-01T10:00:0{i}.000Z", "status": "ok", "latency_ms": 100}
+            for i in range(6)
+        ]
+        outcomes_path = make_outcomes_file(records, "ordered_outcomes.jsonl")
+        
+        engine = PolicyEngine(PolicyConfig(**default_config))
+        decisions = engine.process_file(outcomes_path)
+        
+        expected_ids = [r["id"] for r in records]
+        actual_ids = [d.id for d in decisions]
+        assert actual_ids == expected_ids
+

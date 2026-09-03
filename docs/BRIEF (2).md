@@ -1,4 +1,4 @@
-# Project 3 — Retry & Circuit Breaker Policy Engine
+# Retry & Circuit Breaker Policy Engine
 
 **One week. Graded out of 10 against `RUBRIC_final_projects.md`. This is the last one.**
 

@@ -75,3 +75,25 @@ class TestTimestampMonotonicity:
         assert d5.action == "probe"
         assert d5.provider_state == "CLOSED"
         assert d5.reason == "probe_success_recovery"
+
+    def test_monotonic_time_advances_probe_cooldown_even_with_out_of_order_calls(self, default_engine):
+        """
+        SCEN-G02/G03: Monotonic time tracking ensures that once time passes cooldown_until,
+        subsequent out-of-order records with earlier timestamps evaluate against current_time >= cooldown_until.
+        Target Mutation: `self._max_observed_timestamp = record_time_ms` (time regression).
+        """
+        # Alpha trips at 10:00:00.000Z -> cooldown until 10:00:30.000Z
+        for i in range(3):
+            default_engine.process_record(CallOutcome(id=f"c{i}", provider="alpha", started_at="2026-09-01T10:00:00.000Z", status="error", latency_ms=100))
+        assert default_engine.get_provider_state("alpha").state == "OPEN"
+        
+        # Traffic on provider Beta advances global time to 10:00:35.000Z
+        default_engine.process_record(CallOutcome(id="b1", provider="beta", started_at="2026-09-01T10:00:35.000Z", status="ok", latency_ms=100))
+        
+        # Out-of-order record arrives for Alpha with raw timestamp 10:00:15.000Z (earlier than cooldown_until 10:00:30)
+        # But because global monotonic time is 10:00:35 >= 10:00:30, cooldown has expired -> evaluated as probe!
+        d_probe = default_engine.process_record(CallOutcome(id="p_ooo", provider="alpha", started_at="2026-09-01T10:00:15.000Z", status="ok", latency_ms=200))
+        assert d_probe.action == "probe"
+        assert d_probe.provider_state == "CLOSED"
+        assert d_probe.reason == "probe_success_recovery"
+

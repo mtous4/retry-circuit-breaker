@@ -137,3 +137,68 @@ class TestCircuitBreaker:
         d5 = engine.process_record(CallOutcome(id="c5", provider="alpha", started_at="2026-09-01T10:00:10.000Z", status="ok", latency_ms=200))
         assert d5.action == "probe"
         assert d5.provider_state == "CLOSED"
+
+    def test_probe_exact_slow_threshold_recovers(self, default_engine):
+        """
+        Probe call with latency_ms exactly equal to slow_threshold_ms (5000ms) MUST succeed.
+        Target Mutation: `latency_ms <= slow_threshold_ms` changed to `<` in probe check.
+        """
+        for _ in range(3):
+            default_engine.process_record(CallOutcome(id="c", provider="alpha", started_at="2026-09-01T10:00:00.000Z", status="error", latency_ms=100))
+        
+        # Probe call at 10:00:30.000Z with exact latency 5000ms
+        probe = default_engine.process_record(CallOutcome(id="p", provider="alpha", started_at="2026-09-01T10:00:30.000Z", status="ok", latency_ms=5000))
+        assert probe.action == "probe"
+        assert probe.provider_state == "CLOSED"
+        assert probe.reason == "probe_success_recovery"
+
+    def test_probe_configurable_slow_threshold(self):
+        """Configuration check: custom slow_threshold_ms applies to probe calls."""
+        custom_config = PolicyConfig(
+            failure_threshold=3,
+            cooldown_ms=30000,
+            slow_threshold_ms=2500,  # custom 2500ms threshold
+            max_retries=1,
+            retry_delay_ms=1000
+        )
+        engine = PolicyEngine(custom_config)
+        for _ in range(3):
+            engine.process_record(CallOutcome(id="c", provider="alpha", started_at="2026-09-01T10:00:00.000Z", status="error", latency_ms=100))
+        
+        # Probe at 3000ms (> 2500ms threshold) MUST fail probe
+        # If threshold is hardcoded to 5000, 3000ms would falsely succeed!
+        p_slow = engine.process_record(CallOutcome(id="ps", provider="alpha", started_at="2026-09-01T10:00:30.000Z", status="ok", latency_ms=3000))
+        assert p_slow.action == "probe"
+        assert p_slow.provider_state == "OPEN"
+        assert p_slow.reason == "probe_failure_reopen"
+
+    def test_probe_failure_respects_custom_cooldown(self):
+        """
+        Configuration check: failed probe establishes new cooldown based on custom cooldown_ms.
+        Target Mutation: Hardcoding probe failure cooldown extension to default 30000.
+        """
+        custom_config = PolicyConfig(
+            failure_threshold=3,
+            cooldown_ms=15000,  # 15s cooldown
+            slow_threshold_ms=5000,
+            max_retries=1,
+            retry_delay_ms=1000
+        )
+        engine = PolicyEngine(custom_config)
+        for _ in range(3):
+            engine.process_record(CallOutcome(id="c", provider="alpha", started_at="2026-09-01T10:00:00.000Z", status="error", latency_ms=100))
+        
+        # Probe at 10:00:15.000Z fails
+        pf = engine.process_record(CallOutcome(id="pf", provider="alpha", started_at="2026-09-01T10:00:15.000Z", status="timeout", latency_ms=5000))
+        assert pf.action == "probe"
+        assert pf.provider_state == "OPEN"
+        
+        # New cooldown expires at 10:00:15 + 15s = 10:00:30.000Z
+        # Call at 10:00:29.999Z must be refused
+        d_early = engine.process_record(CallOutcome(id="de", provider="alpha", started_at="2026-09-01T10:00:29.999Z", status="ok", latency_ms=100))
+        assert d_early.action == "refuse"
+        
+        # Call at 10:00:30.000Z must be evaluated as probe
+        d_probe2 = engine.process_record(CallOutcome(id="dp2", provider="alpha", started_at="2026-09-01T10:00:30.000Z", status="ok", latency_ms=100))
+        assert d_probe2.action == "probe"
+        assert d_probe2.provider_state == "CLOSED"
